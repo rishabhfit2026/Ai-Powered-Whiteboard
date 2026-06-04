@@ -1,0 +1,19 @@
+{
+  "name": "ai-powered-whiteboard",
+  "version": "1.0.0",
+  "description": "Low-latency computer-vision whiteboard that turns a camera and pen/marker into a live digital writing surface.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check src/app.js"
+  },
+  "keywords": [
+    "computer-vision",
+    "whiteboard",
+    "camera",
+    "canvas",
+    "realtime"
+  ],
+  "author": "",
+  "license": "MIT"
+}

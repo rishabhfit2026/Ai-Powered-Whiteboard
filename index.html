@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Powered Whiteboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="tool-panel" aria-label="Whiteboard controls">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">AI</span>
+          <div>
+            <h1>AI Whiteboard</h1>
+            <p id="cameraStatus">Camera idle</p>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <button class="primary-action" id="cameraToggle" type="button">
+            <span aria-hidden="true">●</span>
+            Start camera
+          </button>
+          <button id="calibrateBtn" type="button">Calibrate pen</button>
+        </div>
+
+        <div class="control-group">
+          <label for="modeSelect">Board mode</label>
+          <select id="modeSelect">
+            <option value="board">Clean whiteboard</option>
+            <option value="camera">Camera board</option>
+            <option value="overlay">Transparent overlay</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label>Ink color</label>
+          <div class="swatches" role="radiogroup" aria-label="Ink color">
+            <button class="swatch active" data-color="#111827" style="--swatch: #111827" type="button" aria-label="Black"></button>
+            <button class="swatch" data-color="#2563eb" style="--swatch: #2563eb" type="button" aria-label="Blue"></button>
+            <button class="swatch" data-color="#dc2626" style="--swatch: #dc2626" type="button" aria-label="Red"></button>
+            <button class="swatch" data-color="#16a34a" style="--swatch: #16a34a" type="button" aria-label="Green"></button>
+          </div>
+        </div>
+
+        <div class="control-grid">
+          <label for="thicknessRange">Thickness</label>
+          <output id="thicknessValue">7</output>
+          <input id="thicknessRange" min="2" max="18" value="7" type="range" />
+        </div>
+
+        <div class="control-grid">
+          <label for="smoothingRange">Smoothing</label>
+          <output id="smoothingValue">65</output>
+          <input id="smoothingRange" min="10" max="92" value="65" type="range" />
+        </div>
+
+        <div class="toggle-list">
+          <label><input id="mirrorToggle" type="checkbox" checked /> Mirror camera</label>
+          <label><input id="gridToggle" type="checkbox" /> Grid</label>
+          <label><input id="stabilizeToggle" type="checkbox" checked /> AI stabilize</label>
+          <label><input id="autoWriteToggle" type="checkbox" checked /> Auto write</label>
+        </div>
+
+        <div class="control-group two-up">
+          <button id="undoBtn" type="button">Undo</button>
+          <button id="clearBtn" type="button">Clear</button>
+          <button id="saveBtn" type="button">Save PNG</button>
+          <button id="eraseBtn" type="button">Erase mode</button>
+        </div>
+
+        <div class="meter">
+          <span>FPS</span>
+          <strong id="fpsValue">0</strong>
+          <span>Pen</span>
+          <strong id="penValue">Lost</strong>
+        </div>
+      </aside>
+
+      <section class="board-stage" aria-label="Live whiteboard">
+        <div class="stage-toolbar">
+          <div class="status-pill" id="pipelineStatus">Waiting for camera</div>
+          <div class="status-pill" id="resolutionStatus">0 x 0</div>
+        </div>
+
+        <div class="canvas-wrap">
+          <video id="cameraFeed" playsinline muted></video>
+          <canvas id="outputCanvas"></canvas>
+          <canvas id="inkCanvas"></canvas>
+          <canvas id="analysisCanvas"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <script src="src/app.js"></script>
+  </body>
+</html>
