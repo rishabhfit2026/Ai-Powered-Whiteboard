@@ -2,12 +2,12 @@
 
 ## Mission
 
-Build and maintain an AI-powered computer-vision whiteboard that feels live, clean, and practical. The main goal is a camera-based app where a person can write with a visible pen or marker and see the writing appear immediately on a digital whiteboard.
+Build and maintain an AI-powered computer-vision whiteboard that feels live, clean, and practical. The main goal is a camera-based OpenCV app where a person can hold a pen in the hand, write in front of the camera, and see the writing appear immediately on a digital whiteboard.
 
 ## Product Intent
 
 - The board must feel like a real digital board, not a slow computer-vision experiment.
-- Camera access should be simple and local-first.
+- Camera access should be simple and local-first through OpenCV first, with browser camera support as a secondary demo.
 - Writing latency is the highest-priority UX constraint.
 - The visual output should be clean enough for demos, teaching, and presentation.
 - Controls should match what users expect from a digital board: color, thickness, eraser, undo, clear, grid, mirror, mode, and export.
@@ -26,12 +26,27 @@ Build and maintain an AI-powered computer-vision whiteboard that feels live, cle
 
 ## Current Architecture
 
-- `server.js` serves the app on localhost.
-- `index.html` defines the whiteboard UI and canvases.
-- `styles.css` owns layout and visual design.
-- `src/app.js` owns camera access, marker detection, smoothing, ink drawing, and board composition.
+- `cv_whiteboard.py` is the primary standalone OpenCV pen-tracking app.
+- `requirements.txt` lists Python CV dependencies.
+- `server.js` serves the optional browser demo on localhost.
+- `index.html` defines the optional browser whiteboard UI and canvases.
+- `styles.css` owns browser layout and visual design.
+- `src/app.js` owns browser camera access, marker detection, smoothing, ink drawing, and board composition.
 
-## CV Pipeline
+## OpenCV Pipeline
+
+1. Open the system camera using `cv2.VideoCapture`.
+2. Mirror the frame for natural writing.
+3. Build a skin mask from HSV and YCrCb to suppress hand pixels.
+4. Build a pen mask from calibrated color, vivid color, dark-pen motion, and background foreground.
+5. Remove hand pixels from the pen mask.
+6. Extract contours from the final candidate mask.
+7. Score contours by size, shape, saturation, motion, continuity, and distance away from skin.
+8. Select the probable writing tip from the winning contour.
+9. Smooth the tip with a Kalman filter.
+10. Draw the smoothed tip path onto the board ink layer.
+
+## Browser Pipeline
 
 1. Request the system camera using `navigator.mediaDevices.getUserMedia`.
 2. Draw each frame into a small analysis canvas.
@@ -54,6 +69,7 @@ Build and maintain an AI-powered computer-vision whiteboard that feels live, cle
 ## Implementation Notes
 
 - Use bright colored pens or marker caps for marker tracking.
+- Keep `cv_whiteboard.py` as the main CV implementation when the user asks for actual pen tracking.
 - Preserve dependency-free startup unless a library adds real value.
 - If adding model-based hand or pen detection, load it asynchronously and keep the current color tracker as a fallback.
 - If changing the tracker, keep `Smart hybrid`, `Color pen`, and `Dark pen` useful for different pen/camera setups.

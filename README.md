@@ -1,9 +1,18 @@
 # AI Powered Whiteboard
 
-A low-latency computer-vision whiteboard that uses the system camera to turn a colored pen or marker into live digital writing. The app runs fully in the browser: camera frames are processed locally, pen motion is stabilized, and ink is drawn directly onto a canvas.
+A low-latency computer-vision whiteboard that uses the system camera to track a pen in your hand and reflect whatever you write onto a digital board.
+
+The main implementation is now a standalone Python/OpenCV app in `cv_whiteboard.py`. The browser version is still included as an optional local UI demo.
 
 ## Features
 
+- Standalone OpenCV camera app for real pen tracking
+- Pen-tip detection while the pen is held in the hand
+- Hand/skin suppression so the tracker prefers the pen instead of fingers
+- Color calibration from the camera center
+- Motion and background-change cues for dark pens
+- Contour/component scoring with Kalman smoothing
+- Live digital board window, undo, erase, clear, save, and mask preview
 - System camera access through `getUserMedia`
 - Real-time pen detection with color, motion, dark-pen, and background-change cues
 - Connected-component blob tracking that locks onto the pen and selects the writing tip
@@ -14,7 +23,30 @@ A low-latency computer-vision whiteboard that uses the system camera to turn a c
 - Local static server so camera permissions work reliably on `localhost`
 - No external runtime dependencies
 
-## Quick Start
+## Run The Computer Vision App
+
+```bash
+python3 cv_whiteboard.py
+```
+
+Hold your pen tip in the cyan square at the center of the camera window and press `c` to calibrate. After that, write in front of the camera. The tracked pen-tip path appears in the `Digital Board` window.
+
+### OpenCV Controls
+
+```text
+c       calibrate pen color from center square
+space   toggle drawing on/off
+e       toggle eraser
+u       undo last stroke
+x       clear board
+m       show/hide pen mask preview
+s       save board PNG
+q/esc   quit
+```
+
+For strongest tracking, use a red, blue, green, or otherwise visually distinct pen tip/cap. Black pens can still work when moving because the tracker uses motion and background-change cues, but color calibration is more stable.
+
+## Run The Browser Demo
 
 ```bash
 npm start
@@ -41,10 +73,11 @@ The app samples the center pixels and biases the detector toward that pen color.
 ## Verification
 
 ```bash
+python3 -m py_compile cv_whiteboard.py
 npm run check
 ```
 
-This checks the Node server and browser application JavaScript syntax.
+This checks the standalone OpenCV app and browser application syntax.
 
 ## Project Structure
 
@@ -52,15 +85,28 @@ This checks the Node server and browser application JavaScript syntax.
 .
 ├── AGENTS.md
 ├── README.md
+├── cv_whiteboard.py
 ├── index.html
 ├── package.json
+├── requirements.txt
 ├── server.js
 ├── src/
 │   └── app.js
 └── styles.css
 ```
 
-## How It Works
+## How The OpenCV App Works
+
+The OpenCV app reads frames from the webcam, mirrors the image for natural writing, and builds several masks:
+
+- skin mask from HSV and YCrCb to suppress the hand
+- calibrated/vivid color mask for colored pens
+- motion foreground mask from background subtraction
+- dark-pen mask gated by motion
+
+It combines those masks, extracts contours, filters by size and shape, and scores each candidate using saturation, motion, elongated shape, continuity, and distance away from skin. The chosen contour is reduced to a probable pen tip, then passed through a Kalman filter. The smoothed tip is drawn onto an RGBA ink layer and composited onto the board.
+
+## How The Browser Demo Works
 
 The app draws camera frames into a small analysis canvas, scores pixels by calibrated color, vivid color, dark-pen motion, and background change, then groups candidate pixels into connected components. Each component is ranked by confidence, size, density, and proximity to the current tracker lock. The selected component is reduced to a likely writing tip using motion direction and strongest-pixel evidence, then smoothed and drawn onto a persistent ink canvas.
 
