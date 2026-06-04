@@ -13,6 +13,7 @@
     cameraToggle: document.getElementById("cameraToggle"),
     calibrateBtn: document.getElementById("calibrateBtn"),
     modeSelect: document.getElementById("modeSelect"),
+    trackerSelect: document.getElementById("trackerSelect"),
     thicknessRange: document.getElementById("thicknessRange"),
     thicknessValue: document.getElementById("thicknessValue"),
     smoothingRange: document.getElementById("smoothingRange"),
@@ -37,7 +38,7 @@
     stream: null,
     width: 1280,
     height: 720,
-    analysisWidth: 320,
+    analysisWidth: 384,
     analysisHeight: 180,
     inkColor: "#111827",
     thickness: 7,
@@ -47,6 +48,10 @@
     lastPoint: null,
     activeStroke: false,
     lastSeenAt: 0,
+    previousFrame: null,
+    backgroundLuma: null,
+    lastAnalysisPoint: null,
+    velocityAnalysis: { x: 0, y: 0 },
     frameCount: 0,
     fpsStartedAt: performance.now(),
     snapshots: [],
@@ -75,6 +80,7 @@
     analysisCanvas.width = state.analysisWidth;
     analysisCanvas.height = Math.round((height / width) * state.analysisWidth);
     state.analysisHeight = analysisCanvas.height;
+    resetTrackerMemory();
 
     inkCtx.clearRect(0, 0, width, height);
     inkCtx.drawImage(oldInk, 0, 0, width, height);
@@ -105,6 +111,7 @@
       ui.cameraToggle.textContent = "Stop camera";
       ui.cameraStatus.textContent = "Camera live";
       setStatus("Realtime CV active", "ok");
+      resetTrackerMemory();
       resizeCanvases();
       requestAnimationFrame(loop);
     } catch (error) {
@@ -198,10 +205,15 @@
 
     const frame = analysisCtx.getImageData(0, 0, state.analysisWidth, state.analysisHeight);
     const candidate = findMarkerCandidate(frame);
+    rememberFrame(frame);
 
     if (!candidate) {
-      const bridgeWindow = now - state.lastSeenAt < 140;
+      const bridgeWindow = now - state.lastSeenAt < 110;
       ui.penValue.textContent = bridgeWindow ? "Bridge" : "Lost";
+      if (!bridgeWindow && now - state.lastSeenAt > 350) {
+        state.lastAnalysisPoint = null;
+        state.velocityAnalysis = { x: 0, y: 0 };
+      }
       return bridgeWindow ? state.lastPoint : null;
     }
 
@@ -211,44 +223,305 @@
     const point = smoothPoint(rawPoint);
 
     state.lastSeenAt = now;
-    ui.penValue.textContent = candidate.confidence > 0.72 ? "Locked" : "Tracking";
+    ui.penValue.textContent = candidate.confidence > 0.72 ? "Tip locked" : "Tracking";
     return point;
   }
 
   function findMarkerCandidate(frame) {
     const data = frame.data;
-    let totalWeight = 0;
-    let totalX = 0;
-    let totalY = 0;
-    let strongest = 0;
-    const calibration = state.calibration;
+    const width = frame.width;
+    const height = frame.height;
+    const totalPixels = width * height;
+    const previous = state.previousFrame;
+    const background = state.backgroundLuma;
+    const scoreMap = new Float32Array(totalPixels);
+    const visited = new Uint8Array(totalPixels);
+    const stack = new Int32Array(totalPixels);
+    const roi = getTrackingRoi(width, height);
+    let best = null;
 
-    for (let y = 0; y < frame.height; y += 1) {
-      for (let x = 0; x < frame.width; x += 1) {
-        const index = (y * frame.width + x) * 4;
+    for (let y = roi.y0; y <= roi.y1; y += 1) {
+      for (let x = roi.x0; x <= roi.x1; x += 1) {
+        const pixel = y * width + x;
+        const index = pixel * 4;
         const r = data[index];
         const g = data[index + 1];
         const b = data[index + 2];
-        const score = calibration ? calibratedScore(r, g, b, calibration) : vividMarkerScore(r, g, b);
+        const luma = luminance(r, g, b);
+        const colorScore = colorPenScore(r, g, b);
+        const motionScore = previous ? pixelMotionScore(data, previous, index) : 0;
+        const backgroundScore = background ? Math.min(1, Math.abs(luma - background[pixel]) / 58) : 0;
+        const darkScore = darkPenScore(r, g, b, motionScore, backgroundScore);
+        const score = combineScores(colorScore, darkScore, motionScore, backgroundScore);
 
-        if (score > 0.42) {
-          totalWeight += score;
-          totalX += x * score;
-          totalY += y * score;
-          strongest = Math.max(strongest, score);
+        if (score >= trackingThreshold(x, y, roi, colorScore, darkScore, motionScore)) {
+          scoreMap[pixel] = score;
         }
       }
     }
 
-    if (totalWeight < 10) {
+    for (let y = roi.y0; y <= roi.y1; y += 1) {
+      for (let x = roi.x0; x <= roi.x1; x += 1) {
+        const pixel = y * width + x;
+        if (visited[pixel] || scoreMap[pixel] === 0) {
+          continue;
+        }
+
+        const component = collectComponent(pixel, width, height, roi, scoreMap, visited, stack);
+        const ranked = rankComponent(component, width, height);
+        if (ranked && (!best || ranked.rank > best.rank)) {
+          best = ranked;
+        }
+      }
+    }
+
+    if (!best) {
+      return null;
+    }
+
+    updateAnalysisVelocity(best.x, best.y);
+    return best;
+  }
+
+  function getTrackingRoi(width, height) {
+    const last = state.lastAnalysisPoint;
+    if (!last) {
+      return { x0: 0, y0: 0, x1: width - 1, y1: height - 1, locked: false };
+    }
+
+    const speed = Math.hypot(state.velocityAnalysis.x, state.velocityAnalysis.y);
+    const radius = Math.max(44, Math.min(130, 52 + speed * 10));
+    return {
+      x0: Math.max(0, Math.floor(last.x - radius)),
+      y0: Math.max(0, Math.floor(last.y - radius)),
+      x1: Math.min(width - 1, Math.ceil(last.x + radius)),
+      y1: Math.min(height - 1, Math.ceil(last.y + radius)),
+      locked: true
+    };
+  }
+
+  function trackingThreshold(x, y, roi, colorScore, darkScore, motionScore) {
+    const mode = ui.trackerSelect.value;
+    let threshold = roi.locked ? 0.25 : 0.38;
+
+    if (mode === "color") {
+      threshold += colorScore > 0.35 ? -0.08 : 0.24;
+    } else if (mode === "dark") {
+      threshold += darkScore > 0.28 || motionScore > 0.3 ? -0.05 : 0.18;
+    } else if (colorScore > 0.38 || motionScore > 0.45) {
+      threshold -= 0.06;
+    }
+
+    if (roi.locked) {
+      const cx = (roi.x0 + roi.x1) / 2;
+      const cy = (roi.y0 + roi.y1) / 2;
+      const distance = Math.hypot(x - cx, y - cy);
+      const maxDistance = Math.max(1, Math.hypot(roi.x1 - cx, roi.y1 - cy));
+      threshold -= (1 - distance / maxDistance) * 0.05;
+    }
+
+    return threshold;
+  }
+
+  function combineScores(colorScore, darkScore, motionScore, backgroundScore) {
+    const mode = ui.trackerSelect.value;
+    const motionBoost = motionScore * 0.22 + backgroundScore * 0.18;
+
+    if (mode === "color") {
+      return colorScore * 1.18 + motionBoost * 0.55;
+    }
+
+    if (mode === "dark") {
+      return darkScore * 1.18 + motionBoost;
+    }
+
+    return Math.max(colorScore * 1.12, darkScore) + motionBoost;
+  }
+
+  function collectComponent(startPixel, width, height, roi, scoreMap, visited, stack) {
+    let stackSize = 0;
+    let area = 0;
+    let weight = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let strongest = 0;
+    let bestPixel = startPixel;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    const pixels = [];
+
+    stack[stackSize] = startPixel;
+    stackSize += 1;
+    visited[startPixel] = 1;
+
+    while (stackSize > 0) {
+      stackSize -= 1;
+      const pixel = stack[stackSize];
+      const score = scoreMap[pixel];
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+
+      area += 1;
+      weight += score;
+      sumX += x * score;
+      sumY += y * score;
+      pixels.push(pixel);
+
+      if (score > strongest) {
+        strongest = score;
+        bestPixel = pixel;
+      }
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+
+      pushNeighbor(pixel - 1, x > roi.x0);
+      pushNeighbor(pixel + 1, x < roi.x1);
+      pushNeighbor(pixel - width, y > roi.y0);
+      pushNeighbor(pixel + width, y < roi.y1);
+    }
+
+    function pushNeighbor(nextPixel, allowed) {
+      if (!allowed || visited[nextPixel] || scoreMap[nextPixel] === 0) {
+        return;
+      }
+      visited[nextPixel] = 1;
+      stack[stackSize] = nextPixel;
+      stackSize += 1;
+    }
+
+    return {
+      area,
+      weight,
+      cx: sumX / Math.max(0.001, weight),
+      cy: sumY / Math.max(0.001, weight),
+      strongest,
+      bestPixel,
+      minX,
+      minY,
+      maxX,
+      maxY,
+      pixels,
+      scoreMap
+    };
+  }
+
+  function rankComponent(component, width, height) {
+    if (component.area < 3 || component.area > 1900 || component.weight < 2.8) {
+      return null;
+    }
+
+    const boxWidth = component.maxX - component.minX + 1;
+    const boxHeight = component.maxY - component.minY + 1;
+    const boxArea = boxWidth * boxHeight;
+    const density = component.area / Math.max(1, boxArea);
+    const compactness = Math.min(1, component.weight / Math.max(1, component.area * 0.55));
+    const sizePenalty = component.area > 600 ? (component.area - 600) / 1500 : 0;
+    let lockScore = 0;
+
+    if (state.lastAnalysisPoint) {
+      const distance = Math.hypot(component.cx - state.lastAnalysisPoint.x, component.cy - state.lastAnalysisPoint.y);
+      lockScore = Math.max(0, 1 - distance / 115);
+    }
+
+    const tip = chooseComponentTip(component, width);
+    const confidence = Math.max(0, Math.min(1, component.strongest * 0.65 + compactness * 0.22 + lockScore * 0.2));
+    const rank = confidence + lockScore * 0.55 + density * 0.16 - sizePenalty;
+
+    if (rank < 0.34) {
       return null;
     }
 
     return {
-      x: totalX / totalWeight,
-      y: totalY / totalWeight,
-      confidence: Math.min(1, strongest * Math.min(1, totalWeight / 180))
+      x: tip.x,
+      y: tip.y,
+      confidence,
+      rank,
+      area: component.area
     };
+  }
+
+  function chooseComponentTip(component, width) {
+    const speed = Math.hypot(state.velocityAnalysis.x, state.velocityAnalysis.y);
+    const bestX = component.bestPixel % width;
+    const bestY = Math.floor(component.bestPixel / width);
+
+    if (speed < 0.35 || component.pixels.length < 8) {
+      return {
+        x: component.cx * 0.68 + bestX * 0.32,
+        y: component.cy * 0.68 + bestY * 0.32
+      };
+    }
+
+    const vx = state.velocityAnalysis.x / speed;
+    const vy = state.velocityAnalysis.y / speed;
+    let tipPixel = component.bestPixel;
+    let tipRank = -Infinity;
+
+    for (let index = 0; index < component.pixels.length; index += 1) {
+      const pixel = component.pixels[index];
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+      const lead = (x - component.cx) * vx + (y - component.cy) * vy;
+      const score = lead + component.scoreMap[pixel] * 9;
+      if (score > tipRank) {
+        tipRank = score;
+        tipPixel = pixel;
+      }
+    }
+
+    const tipX = tipPixel % width;
+    const tipY = Math.floor(tipPixel / width);
+    return {
+      x: component.cx * 0.25 + tipX * 0.75,
+      y: component.cy * 0.25 + tipY * 0.75
+    };
+  }
+
+  function updateAnalysisVelocity(x, y) {
+    if (state.lastAnalysisPoint) {
+      state.velocityAnalysis = {
+        x: state.velocityAnalysis.x * 0.55 + (x - state.lastAnalysisPoint.x) * 0.45,
+        y: state.velocityAnalysis.y * 0.55 + (y - state.lastAnalysisPoint.y) * 0.45
+      };
+    }
+
+    state.lastAnalysisPoint = { x, y };
+  }
+
+  function rememberFrame(frame) {
+    const data = frame.data;
+    const totalPixels = frame.width * frame.height;
+
+    if (!state.backgroundLuma || state.backgroundLuma.length !== totalPixels) {
+      state.backgroundLuma = new Float32Array(totalPixels);
+      for (let pixel = 0; pixel < totalPixels; pixel += 1) {
+        const index = pixel * 4;
+        state.backgroundLuma[pixel] = luminance(data[index], data[index + 1], data[index + 2]);
+      }
+    } else {
+      for (let pixel = 0; pixel < totalPixels; pixel += 1) {
+        const index = pixel * 4;
+        const current = luminance(data[index], data[index + 1], data[index + 2]);
+        state.backgroundLuma[pixel] = state.backgroundLuma[pixel] * 0.965 + current * 0.035;
+      }
+    }
+
+    if (!state.previousFrame || state.previousFrame.length !== data.length) {
+      state.previousFrame = new Uint8ClampedArray(data.length);
+    }
+    state.previousFrame.set(data);
+  }
+
+  function resetTrackerMemory() {
+    state.previousFrame = null;
+    state.backgroundLuma = null;
+    state.lastAnalysisPoint = null;
+    state.velocityAnalysis = { x: 0, y: 0 };
   }
 
   function vividMarkerScore(r, g, b) {
@@ -262,10 +535,40 @@
     return Math.max(blueBias, redBias, greenBias) * 0.72 + saturation * brightness * 0.45;
   }
 
+  function colorPenScore(r, g, b) {
+    if (state.calibration) {
+      return calibratedScore(r, g, b, state.calibration);
+    }
+
+    return vividMarkerScore(r, g, b);
+  }
+
+  function darkPenScore(r, g, b, motionScore, backgroundScore) {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const darkness = 1 - max / 255;
+    const lowSaturation = 1 - (max - min) / Math.max(1, max);
+    const movementGate = Math.max(motionScore, backgroundScore);
+    const baseline = ui.trackerSelect.value === "dark" ? 0.08 : 0.015;
+    return Math.pow(Math.max(0, darkness), 1.8) * (0.25 + lowSaturation * 0.35) * (baseline + movementGate * 1.6);
+  }
+
   function calibratedScore(r, g, b, target) {
     const distance = Math.hypot(r - target.r, g - target.g, b - target.b);
     const similarity = 1 - Math.min(1, distance / 185);
     return similarity * vividMarkerScore(r, g, b) * 1.75;
+  }
+
+  function pixelMotionScore(current, previous, index) {
+    const diff =
+      Math.abs(current[index] - previous[index]) +
+      Math.abs(current[index + 1] - previous[index + 1]) +
+      Math.abs(current[index + 2] - previous[index + 2]);
+    return Math.min(1, diff / 135);
+  }
+
+  function luminance(r, g, b) {
+    return 0.299 * r + 0.587 * g + 0.114 * b;
   }
 
   function smoothPoint(point) {
